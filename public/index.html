@@ -237,9 +237,9 @@
         this.state = "idle";
         this.event = null;
         this.queue = [];
-        this.seenIds = new Set();
+        this.lastProcessedEventId = null;
         this.stateStarted = performance.now();
-        this.lastEventAt = 0;
+        this.lastActionCompletedAt = this.stateStarted;
         this.nextWanderAt = this.stateStarted + 9000;
         this.lookUntil = 0;
         this.lookDir = 0;
@@ -274,15 +274,22 @@
       }
 
       enqueue(events) {
-        events
-          .slice()
-          .reverse()
-          .filter((event) => !this.seenIds.has(event.id))
+        const orderedEvents = events
+          .map((event) => ({ ...event, id: Number(event.id) }))
+          .filter((event) => Number.isFinite(event.id))
+          .sort((a, b) => a.id - b.id);
+
+        if (this.lastProcessedEventId === null) {
+          this.lastProcessedEventId = orderedEvents.reduce((maxId, event) => Math.max(maxId, event.id), 0);
+          return;
+        }
+
+        orderedEvents
+          .filter((event) => event.id > this.lastProcessedEventId)
           .forEach((event) => {
-            this.seenIds.add(event.id);
+            this.lastProcessedEventId = event.id;
             this.queue.push(event);
           });
-        while (this.seenIds.size > 300) this.seenIds.delete(this.seenIds.values().next().value);
       }
 
       actionText() {
@@ -306,7 +313,7 @@
         this.event = event;
         this.state = event.type === "subagent_start" || event.type === "subagent_end" ? "codex" : event.type;
         this.stateStarted = time;
-        this.lastEventAt = time;
+        this.lastActionCompletedAt = null;
         this.boxProgress = 0;
         this.termChars = [];
         const targets = { terminal: "terminal", codex: "build", food: "build", deploy: "server", backup: "server", cron: "build", error: "build" };
@@ -317,14 +324,20 @@
       updateState(time) {
         const elapsed = time - this.stateStarted;
         const atTarget = Math.abs(this.wex.targetX - this.wex.x) < 2;
-        if (this.event && elapsed > 3000 && this.queue.length) {
-          this.startEvent(this.queue.shift(), time);
-        } else if (this.event && elapsed > 30000) {
-          this.event = null;
-          this.state = "idle";
-          this.stateStarted = time;
-          this.wex.targetX = this.stationX("build");
-          this.ticker.textContent = "Wex is idle";
+        if (this.event && elapsed > 3000) {
+          if (this.queue.length) {
+            this.startEvent(this.queue.shift(), time);
+          } else {
+            if (this.lastActionCompletedAt === null) this.lastActionCompletedAt = time;
+            if (time - this.lastActionCompletedAt > 30000) {
+              this.event = null;
+              this.state = "idle";
+              this.stateStarted = time;
+              this.lastActionCompletedAt = time;
+              this.wex.targetX = this.stationX("build");
+              this.ticker.textContent = "Wex is idle";
+            }
+          }
         } else if (!this.event && this.queue.length) {
           this.startEvent(this.queue.shift(), time);
         } else if (!this.event && time > this.nextWanderAt && atTarget) {
@@ -747,11 +760,15 @@
       wexWorkspace.enqueue(payload.events || []);
     }
 
-    async function refreshAll() {
+    async function refreshAll(retries = 3) {
       try {
         await Promise.all([loadState(), loadEvents(), loadAgentEvents()]);
       } catch (error) {
-        showToast("Mission Control refresh failed");
+        if (retries > 0) {
+          setTimeout(() => refreshAll(retries - 1), 2000);
+        } else {
+          showToast("Mission Control refresh failed");
+        }
       }
     }
 

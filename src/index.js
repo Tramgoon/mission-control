@@ -125,6 +125,8 @@ db.exec(`
   );
 `);
 
+db.prepare("DELETE FROM agent_events").run();
+
 const statements = {
   upsertProcess: db.prepare(`
     INSERT INTO processes (name, pid, status, uptime, restarts, memory_mb, cpu, updated_at)
