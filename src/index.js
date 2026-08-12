@@ -9,8 +9,21 @@ const path = require("path");
 const PORT = Number(process.env.PORT || 3200);
 const POLL_INTERVAL_MS = 10_000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "mission-control.sqlite");
+const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || "";
 const PM2_BIN = "/home/hermes/.local/node_modules/.bin/pm2";
 const CRON_JOBS_PATH = "/home/hermes/.hermes/cron/jobs.json";
+const AGENT_EVENT_TYPES = new Set([
+  "terminal",
+  "codex",
+  "food",
+  "deploy",
+  "subagent_start",
+  "subagent_end",
+  "error",
+  "cron",
+  "backup",
+]);
+const AGENT_EVENT_SOURCES = new Set(["wex", "subagent"]);
 
 const repos = [
   { name: "debt-tracker", path: "/home/hermes/debt-tracker" },
@@ -102,6 +115,14 @@ db.exec(`
     active_debts INTEGER,
     captured_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS agent_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    description TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `);
 
 const statements = {
@@ -166,6 +187,11 @@ const statements = {
     VALUES (?, ?, ?, ?)
   `),
   trimDebt: db.prepare("DELETE FROM debt_activity WHERE id NOT IN (SELECT id FROM debt_activity ORDER BY captured_at DESC, id DESC LIMIT 100)"),
+  insertAgentEvent: db.prepare(`
+    INSERT INTO agent_events (type, description, source, created_at)
+    VALUES (@type, @description, @source, @created_at)
+  `),
+  trimAgentEvents: db.prepare("DELETE FROM agent_events WHERE id NOT IN (SELECT id FROM agent_events ORDER BY created_at DESC, id DESC LIMIT 200)"),
 };
 
 function nowIso() {
@@ -182,6 +208,27 @@ function textOrNull(value) {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
   return JSON.stringify(value);
+}
+
+function cleanText(value, maxLength) {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, maxLength);
+}
+
+function requireAgentToken(req, res, next) {
+  if (!AGENT_API_TOKEN) {
+    res.status(503).json({ error: "AGENT_API_TOKEN is not configured" });
+    return;
+  }
+
+  const header = req.get("authorization") || "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match || match[1] !== AGENT_API_TOKEN) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  next();
 }
 
 function cronScheduleText(value) {
@@ -501,6 +548,12 @@ function getState() {
 function getEvents() {
   const events = [
     ...rows(`
+      SELECT created_at AS timestamp, source, type, description
+      FROM agent_events
+      ORDER BY created_at DESC, id DESC
+      LIMIT 200
+    `),
+    ...rows(`
       SELECT updated_at AS timestamp, 'pm2' AS source,
         name || ' is ' || COALESCE(status, 'unknown') || ' (restarts: ' || COALESCE(restarts, 0) || ')' AS description
       FROM processes
@@ -550,8 +603,18 @@ function getEvents() {
     .slice(0, 50);
 }
 
+function getAgentEvents(limit = 50) {
+  return rows(`
+    SELECT id, type, description, source, created_at
+    FROM agent_events
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `, limit);
+}
+
 const app = express();
 app.disable("x-powered-by");
+app.use(express.json({ limit: "16kb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.get("/api/state", (req, res) => {
@@ -560,6 +623,41 @@ app.get("/api/state", (req, res) => {
 
 app.get("/api/events", (req, res) => {
   res.json({ server_time: nowIso(), events: getEvents() });
+});
+
+app.get("/api/agent-events", (req, res) => {
+  res.json({ server_time: nowIso(), events: getAgentEvents(50) });
+});
+
+app.post("/api/events", requireAgentToken, (req, res) => {
+  const type = cleanText(req.body?.type, 40);
+  const description = cleanText(req.body?.description, 500);
+  const source = cleanText(req.body?.source, 40);
+
+  if (!AGENT_EVENT_TYPES.has(type)) {
+    res.status(400).json({ error: "Invalid event type" });
+    return;
+  }
+  if (!AGENT_EVENT_SOURCES.has(source)) {
+    res.status(400).json({ error: "Invalid event source" });
+    return;
+  }
+  if (!description) {
+    res.status(400).json({ error: "description is required" });
+    return;
+  }
+
+  const createdAt = nowIso();
+  const saveEvent = db.transaction(() => {
+    const result = statements.insertAgentEvent.run({ type, description, source, created_at: createdAt });
+    statements.trimAgentEvents.run();
+    return result.lastInsertRowid;
+  });
+  const id = saveEvent();
+
+  res.status(201).json({
+    event: { id, type, description, source, created_at: createdAt },
+  });
 });
 
 app.listen(PORT, () => {

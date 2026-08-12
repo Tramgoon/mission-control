@@ -46,6 +46,12 @@
     .events{max-height:340px;overflow:auto;padding-right:4px}
     .event{grid-template-columns:150px 130px 1fr;align-items:start}
     .source{color:var(--accent);font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .wex-workspace{margin-bottom:16px;padding:12px 14px 10px}
+    .wex-canvas-wrap{width:100%;height:200px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#151916 0%,#111312 100%);overflow:hidden}
+    #wex-canvas{display:block;width:100%;height:200px}
+    .wex-ticker{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--muted);font-size:.94rem;min-height:22px}
+    .wex-ticker .dot{width:8px;height:8px;box-shadow:0 0 0 3px rgba(143,207,143,.12);flex:0 0 auto}
+    #wex-action{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .toast-wrap{position:fixed;right:18px;bottom:18px;display:grid;gap:10px;z-index:10}
     .toast{background:var(--panel-2);border:1px solid rgba(255,140,122,.55);border-left:4px solid var(--danger);border-radius:8px;padding:12px 14px;box-shadow:0 12px 30px rgba(0,0,0,.35);max-width:320px}
     @media (max-width:1000px){.span-3,.span-4,.span-6,.span-8{grid-column:span 12}.repo-grid,.backup-grid{grid-template-columns:1fr}}
@@ -61,6 +67,16 @@
         <span id="fleet-dot" class="dot"></span>
       </div>
     </header>
+
+    <section class="panel wex-workspace" aria-label="Wex workspace">
+      <div class="wex-canvas-wrap">
+        <canvas id="wex-canvas" height="200"></canvas>
+      </div>
+      <div class="wex-ticker">
+        <span class="dot ok"></span>
+        <span id="wex-action">Wex is idle</span>
+      </div>
+    </section>
 
     <section id="health" class="grid" aria-label="App health"></section>
 
@@ -121,6 +137,7 @@
   <script>
     const stateUrl = "/api/state";
     const eventsUrl = "/api/events";
+    const agentEventsUrl = "/api/agent-events";
     const downApps = new Set();
 
     const fmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
@@ -129,6 +146,16 @@
 
     function text(value, fallback = "--") {
       return value === null || value === undefined || value === "" ? fallback : value;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[char]));
     }
 
     function date(value) {
@@ -195,6 +222,386 @@
       toast.textContent = message;
       document.getElementById("toasts").appendChild(toast);
       setTimeout(() => toast.remove(), 8000);
+    }
+
+    class WexWorkspace {
+      constructor(canvas, ticker) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext("2d");
+        this.ticker = ticker;
+        this.width = 0;
+        this.height = 200;
+        this.dpr = 1;
+        this.floorY = 164;
+        this.wex = { x: 0, targetX: 0, y: 112, angle: 0, facing: 1 };
+        this.state = "idle";
+        this.event = null;
+        this.queue = [];
+        this.seenIds = new Set();
+        this.stateStarted = performance.now();
+        this.lastEventAt = 0;
+        this.nextWanderAt = this.stateStarted + 9000;
+        this.lookUntil = 0;
+        this.lookDir = 0;
+        this.termChars = [];
+        this.boxProgress = 0;
+        this.resize();
+        window.addEventListener("resize", () => this.resize());
+        requestAnimationFrame((time) => this.frame(time));
+      }
+
+      resize() {
+        const rect = this.canvas.getBoundingClientRect();
+        this.width = Math.max(320, Math.floor(rect.width));
+        this.height = 200;
+        this.dpr = window.devicePixelRatio || 1;
+        this.canvas.width = Math.floor(this.width * this.dpr);
+        this.canvas.height = Math.floor(this.height * this.dpr);
+        this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        if (!this.wex.x) {
+          this.wex.x = this.stationX("build");
+          this.wex.targetX = this.wex.x;
+        }
+      }
+
+      stationX(name) {
+        const stations = {
+          terminal: Math.max(64, this.width * 0.17),
+          build: this.width * 0.5,
+          server: Math.min(this.width - 64, this.width * 0.83),
+        };
+        return stations[name] || stations.build;
+      }
+
+      enqueue(events) {
+        events
+          .slice()
+          .reverse()
+          .filter((event) => !this.seenIds.has(event.id))
+          .forEach((event) => {
+            this.seenIds.add(event.id);
+            this.queue.push(event);
+          });
+        while (this.seenIds.size > 300) this.seenIds.delete(this.seenIds.values().next().value);
+      }
+
+      actionText() {
+        if (!this.event) return "Wex is idle";
+        const name = this.event.description || "";
+        const messages = {
+          terminal: "Wex is running terminal commands...",
+          codex: "Wex is building with Codex...",
+          subagent_start: "Wex is building with Codex...",
+          subagent_end: "Wex wrapped up a subagent task",
+          deploy: `Wex deployed ${name}`,
+          food: "Wex is logging food...",
+          error: `Wex hit an error: ${name}`,
+          cron: "Wex is checking scheduled jobs...",
+          backup: "Wex is backing up data...",
+        };
+        return messages[this.event.type] || name || "Wex is working...";
+      }
+
+      startEvent(event, time) {
+        this.event = event;
+        this.state = event.type === "subagent_start" || event.type === "subagent_end" ? "codex" : event.type;
+        this.stateStarted = time;
+        this.lastEventAt = time;
+        this.boxProgress = 0;
+        this.termChars = [];
+        const targets = { terminal: "terminal", codex: "build", food: "build", deploy: "server", backup: "server", cron: "build", error: "build" };
+        this.wex.targetX = this.stationX(targets[this.state] || "build");
+        this.ticker.textContent = this.actionText();
+      }
+
+      updateState(time) {
+        const elapsed = time - this.stateStarted;
+        const atTarget = Math.abs(this.wex.targetX - this.wex.x) < 2;
+        if (this.event && elapsed > 3000 && this.queue.length) {
+          this.startEvent(this.queue.shift(), time);
+        } else if (this.event && elapsed > 30000) {
+          this.event = null;
+          this.state = "idle";
+          this.stateStarted = time;
+          this.wex.targetX = this.stationX("build");
+          this.ticker.textContent = "Wex is idle";
+        } else if (!this.event && this.queue.length) {
+          this.startEvent(this.queue.shift(), time);
+        } else if (!this.event && time > this.nextWanderAt && atTarget) {
+          const choices = ["terminal", "build", "server"];
+          this.wex.targetX = this.stationX(choices[Math.floor(Math.random() * choices.length)]);
+          this.nextWanderAt = time + 10000 + Math.random() * 5000;
+        }
+
+        const delta = this.wex.targetX - this.wex.x;
+        this.wex.facing = Math.abs(delta) > 0.5 ? Math.sign(delta) : this.wex.facing;
+        this.wex.x += delta / 9;
+        this.wex.angle += (0 - this.wex.angle) / 5;
+        if (this.state === "error" && elapsed < 1800) {
+          this.wex.angle = Math.sin(time / 45) * 0.16 + 0.2;
+        }
+
+        if (!this.event && time > this.lookUntil && Math.random() < 0.003) {
+          this.lookDir = Math.random() > 0.5 ? 1 : -1;
+          this.lookUntil = time + 900;
+        }
+        if (time > this.lookUntil) this.lookDir = 0;
+      }
+
+      frame(time) {
+        this.updateState(time);
+        this.draw(time);
+        requestAnimationFrame((nextTime) => this.frame(nextTime));
+      }
+
+      roundedRect(x, y, w, h, r) {
+        const ctx = this.ctx;
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      draw(time) {
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, this.width, this.height);
+        ctx.fillStyle = "#151916";
+        ctx.fillRect(0, 0, this.width, this.height);
+        this.drawStations(time);
+        ctx.strokeStyle = "#343a33";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(12, this.floorY);
+        ctx.lineTo(this.width - 12, this.floorY);
+        ctx.stroke();
+        this.drawEffects(time);
+        this.drawWex(time);
+      }
+
+      drawStations(time) {
+        this.drawTerminal(time);
+        this.drawBuildStation(time);
+        this.drawServer(time);
+      }
+
+      drawTerminal(time) {
+        const ctx = this.ctx;
+        const x = this.stationX("terminal") - 44;
+        const active = this.state === "terminal";
+        ctx.fillStyle = "#222720";
+        ctx.strokeStyle = "#343a33";
+        ctx.lineWidth = 2;
+        this.roundedRect(x, 84, 70, 44, 5);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = active ? "#12351e" : "#162018";
+        ctx.fillRect(x + 8, 92, 54, 26);
+        if (active && Math.random() < 0.2) this.termChars.push(String.fromCharCode(33 + Math.floor(Math.random() * 60)));
+        this.termChars = this.termChars.slice(-20);
+        ctx.fillStyle = "#8fcf8f";
+        ctx.font = "8px ui-monospace, monospace";
+        ctx.fillText(this.termChars.join("").slice(-10), x + 12, 105);
+        ctx.fillText(this.termChars.join("").slice(-8), x + 12, 115);
+        ctx.fillStyle = "#343a33";
+        ctx.fillRect(x + 29, 128, 10, 15);
+        ctx.fillRect(x + 18, 142, 32, 5);
+      }
+
+      drawBuildStation(time) {
+        const ctx = this.ctx;
+        const x = this.stationX("build") - 54;
+        ctx.fillStyle = "#222720";
+        ctx.fillRect(x, 124, 108, 10);
+        ctx.fillRect(x + 9, 134, 8, 30);
+        ctx.fillRect(x + 91, 134, 8, 30);
+        const active = this.state === "codex";
+        this.drawGear(x + 38, 112, 13, active ? time / 260 : 0.2);
+        this.drawGear(x + 66, 113, 10, active ? -time / 220 : -0.4);
+      }
+
+      drawGear(x, y, r, angle) {
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.strokeStyle = "#8fcf8f";
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 8; i++) {
+          ctx.rotate(Math.PI / 4);
+          ctx.beginPath();
+          ctx.moveTo(r - 2, 0);
+          ctx.lineTo(r + 4, 0);
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, 0, r / 3, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      drawServer(time) {
+        const ctx = this.ctx;
+        const x = this.stationX("server") - 32;
+        ctx.fillStyle = "#222720";
+        ctx.strokeStyle = "#343a33";
+        this.roundedRect(x, 70, 64, 94, 5);
+        ctx.fill();
+        ctx.stroke();
+        for (let i = 0; i < 4; i++) {
+          const y = 79 + i * 20;
+          ctx.fillStyle = "#1a1f1c";
+          ctx.fillRect(x + 8, y, 48, 13);
+          const active = this.state === "deploy" || this.state === "backup";
+          ctx.fillStyle = active && Math.sin(time / 120 + i) > -0.2 ? "#8fcf8f" : (i === 2 ? "#ff8c7a" : "#536052");
+          ctx.beginPath();
+          ctx.arc(x + 48, y + 6, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      drawEffects(time) {
+        const ctx = this.ctx;
+        if (this.state === "codex") {
+          this.drawCodexBot(time);
+          if (Math.sin(time / 160) > 0.78) {
+            ctx.strokeStyle = "#f4c86a";
+            ctx.lineWidth = 2;
+            const x = this.stationX("build") + 38;
+            ctx.beginPath();
+            ctx.moveTo(x, 98);
+            ctx.lineTo(x + 7, 91);
+            ctx.lineTo(x + 5, 102);
+            ctx.stroke();
+          }
+        }
+        if (this.state === "error") {
+          ctx.fillStyle = "#ff8c7a";
+          ctx.font = "bold 28px system-ui";
+          ctx.fillText("!", this.wex.x - 4, 58 + Math.sin(time / 55) * 3);
+        }
+        if (this.state === "cron") {
+          const x = this.wex.x;
+          ctx.strokeStyle = "#f4c86a";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(x, 55, 12, 0, Math.PI * 2);
+          ctx.moveTo(x, 55);
+          ctx.lineTo(x, 47);
+          ctx.moveTo(x, 55);
+          ctx.lineTo(x + 7, 55);
+          ctx.stroke();
+        }
+        if (this.state === "backup" && time - this.stateStarted > 1800) {
+          ctx.strokeStyle = "#8fcf8f";
+          ctx.lineWidth = 4;
+          const x = this.stationX("server") + 40;
+          ctx.beginPath();
+          ctx.moveTo(x, 62);
+          ctx.lineTo(x + 8, 70);
+          ctx.lineTo(x + 24, 52);
+          ctx.stroke();
+        }
+      }
+
+      drawCodexBot(time) {
+        const ctx = this.ctx;
+        const x = this.wex.x + 39;
+        const y = 121 + Math.sin(time / 240) * 1.5;
+        ctx.fillStyle = "#4285F4";
+        this.roundedRect(x - 10, y - 24, 20, 24, 4);
+        ctx.fill();
+        this.roundedRect(x - 8, y - 38, 16, 12, 4);
+        ctx.fill();
+        ctx.fillStyle = "#111312";
+        ctx.fillRect(x - 5, y - 34, 3, 3);
+        ctx.fillRect(x + 2, y - 34, 3, 3);
+      }
+
+      drawWex(time) {
+        const ctx = this.ctx;
+        const moving = Math.abs(this.wex.targetX - this.wex.x) > 2;
+        const bob = moving ? Math.sin(time / 95) * 2 : Math.sin(time / 900) * 1.3;
+        const typing = ["terminal", "codex", "food"].includes(this.state);
+        const armWave = typing ? Math.sin(time / 70) * 6 : 0;
+        const blink = Math.sin(time / 4100) > 0.985;
+        const eyeOffset = this.state === "cron" ? -2 : this.lookDir * 2;
+
+        ctx.save();
+        ctx.translate(this.wex.x, this.wex.y + bob);
+        ctx.rotate(this.wex.angle);
+
+        ctx.strokeStyle = "#8fcf8f";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(-9, 45);
+        ctx.lineTo(-13, 53 + (moving ? Math.sin(time / 85) * 5 : 0));
+        ctx.moveTo(9, 45);
+        ctx.lineTo(13, 53 + (moving ? -Math.sin(time / 85) * 5 : 0));
+        ctx.stroke();
+
+        ctx.fillStyle = "#8fcf8f";
+        this.roundedRect(-15, 1, 30, 44, 7);
+        ctx.fill();
+        this.roundedRect(-12, -22, 24, 18, 6);
+        ctx.fill();
+
+        ctx.strokeStyle = "#8fcf8f";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(-16, 13);
+        ctx.lineTo(-24, 24 + armWave);
+        ctx.moveTo(16, 13);
+        ctx.lineTo(24, 24 - armWave);
+        ctx.stroke();
+
+        if (this.state === "deploy") {
+          ctx.fillStyle = "#b48b57";
+          ctx.fillRect(17, 24, 16, 13);
+        }
+        if (this.state === "food") {
+          ctx.fillStyle = "#f4f1e8";
+          ctx.fillRect(18, 21, 13, 17);
+          ctx.strokeStyle = "#343a33";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(21, 27);
+          ctx.lineTo(28, 27);
+          ctx.moveTo(21, 32);
+          ctx.lineTo(27, 32);
+          ctx.stroke();
+        }
+        if (this.state === "backup") {
+          ctx.fillStyle = "#8fcf8f";
+          ctx.beginPath();
+          ctx.ellipse(25, 28, 8, 4, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillRect(17, 28, 16, 12);
+          ctx.beginPath();
+          ctx.ellipse(25, 40, 8, 4, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = "#111312";
+        if (blink) {
+          ctx.fillRect(-7 + eyeOffset, -14, 4, 1);
+          ctx.fillRect(4 + eyeOffset, -14, 4, 1);
+        } else {
+          ctx.fillRect(-7 + eyeOffset, -16, 4, 5);
+          ctx.fillRect(4 + eyeOffset, -16, 4, 5);
+        }
+
+        ctx.restore();
+      }
     }
 
     function renderHealth(apps) {
@@ -305,8 +712,8 @@
       document.getElementById("events").innerHTML = events.map((event) => `
         <div class="event">
           <span class="muted">${date(event.timestamp)}</span>
-          <span class="source">${event.source}</span>
-          <span>${event.description}</span>
+          <span class="source">${escapeHtml(event.source)}</span>
+          <span>${escapeHtml(event.description)}</span>
         </div>
       `).join("") || `<p class="muted">No events yet</p>`;
     }
@@ -329,9 +736,20 @@
       renderEvents(payload.events || []);
     }
 
+    const wexWorkspace = new WexWorkspace(
+      document.getElementById("wex-canvas"),
+      document.getElementById("wex-action"),
+    );
+
+    async function loadAgentEvents() {
+      const response = await fetch(agentEventsUrl);
+      const payload = await response.json();
+      wexWorkspace.enqueue(payload.events || []);
+    }
+
     async function refreshAll() {
       try {
-        await Promise.all([loadState(), loadEvents()]);
+        await Promise.all([loadState(), loadEvents(), loadAgentEvents()]);
       } catch (error) {
         showToast("Mission Control refresh failed");
       }
@@ -340,6 +758,7 @@
     refreshAll();
     setInterval(loadState, 10000);
     setInterval(loadEvents, 5000);
+    setInterval(loadAgentEvents, 3000);
   </script>
 </body>
 </html>
