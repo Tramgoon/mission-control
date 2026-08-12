@@ -1,0 +1,20 @@
+{
+  "name": "mission-control",
+  "version": "1.0.0",
+  "description": "Passive observability dashboard for Hermes agent. Reads from existing sources, zero agent overhead.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["dashboard", "monitoring", "hermes", "observability"],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mission Control</title>
+  <style>
+    :root{color-scheme:dark;--bg:#111312;--panel:#1a1f1c;--panel-2:#222720;--text:#f4f1e8;--muted:#aaa69a;--line:#343a33;--accent:#8fcf8f;--danger:#ff8c7a;--warn:#f4c86a;--input:#0d0f0e}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.45}
+    main{width:min(1500px,100%);margin:0 auto;padding:24px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}
+    h1,h2,h3,p{margin:0}
+    h1{font-size:clamp(1.8rem,4vw,3rem);font-weight:750;letter-spacing:0}
+    h2{font-size:1rem;font-weight:700;margin-bottom:12px}
+    h3{font-size:.95rem;font-weight:700;color:var(--text);margin-bottom:8px}
+    .header-meta{display:flex;align-items:center;gap:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+    .dot{width:12px;height:12px;border-radius:999px;background:var(--muted);box-shadow:0 0 0 4px rgba(170,166,154,.12)}
+    .dot.ok{background:var(--accent);box-shadow:0 0 0 4px rgba(143,207,143,.14)}
+    .dot.bad{background:var(--danger);box-shadow:0 0 0 4px rgba(255,140,122,.14)}
+    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;min-width:0}
+    .panel.alt{background:var(--panel-2)}
+    .span-3{grid-column:span 3}.span-4{grid-column:span 4}.span-6{grid-column:span 6}.span-8{grid-column:span 8}.span-12{grid-column:span 12}
+    .health-card{border-left:4px solid var(--muted)}
+    .health-card.up{border-left-color:var(--accent)}
+    .health-card.down{border-left-color:var(--danger)}
+    .metric{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:8px}
+    .metric strong{font-size:1.7rem;line-height:1;font-variant-numeric:tabular-nums}
+    .muted{color:var(--muted)}
+    .badge{display:inline-flex;align-items:center;min-height:24px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);background:var(--input);font-size:.78rem;font-weight:700;text-transform:uppercase;white-space:nowrap}
+    .badge.ok{color:var(--accent);border-color:rgba(143,207,143,.45)}
+    .badge.warn{color:var(--warn);border-color:rgba(244,200,106,.45)}
+    .badge.bad{color:var(--danger);border-color:rgba(255,140,122,.45)}
+    .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}
+    table{width:100%;border-collapse:collapse;min-width:650px}
+    th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+    th{color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;background:var(--panel-2)}
+    tr:last-child td{border-bottom:0}
+    td{font-size:.92rem}
+    code{color:var(--accent);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    .repo-grid,.backup-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+    .commit,.backup-item,.event{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+    .commit:last-child,.backup-item:last-child,.event:last-child{border-bottom:0}
+    .commit-message,.filename{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .events{max-height:340px;overflow:auto;padding-right:4px}
+    .event{grid-template-columns:150px 130px 1fr;align-items:start}
+    .source{color:var(--accent);font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .toast-wrap{position:fixed;right:18px;bottom:18px;display:grid;gap:10px;z-index:10}
+    .toast{background:var(--panel-2);border:1px solid rgba(255,140,122,.55);border-left:4px solid var(--danger);border-radius:8px;padding:12px 14px;box-shadow:0 12px 30px rgba(0,0,0,.35);max-width:320px}
+    @media (max-width:1000px){.span-3,.span-4,.span-6,.span-8{grid-column:span 12}.repo-grid,.backup-grid{grid-template-columns:1fr}}
+    @media (max-width:640px){main{padding:16px}header{align-items:flex-start;flex-direction:column}.event{grid-template-columns:1fr}.commit,.backup-item{grid-template-columns:1fr}.metric{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Mission Control</h1>
+      <div class="header-meta">
+        <span id="server-clock">--</span>
+        <span id="fleet-dot" class="dot"></span>
+      </div>
+    </header>
+
+    <section id="health" class="grid" aria-label="App health"></section>
+
+    <section class="grid" style="margin-top:16px">
+      <article class="panel span-8">
+        <h2>PM2 Processes</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Status</th><th>Uptime</th><th>Restarts</th><th>Memory</th><th>CPU</th></tr></thead>
+            <tbody id="processes"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel span-4">
+        <h2>Food Tracker</h2>
+        <div class="metric"><span class="muted">Calories</span><strong id="food-calories">--</strong></div>
+        <div class="metric"><span class="muted">Protein</span><strong id="food-protein">--</strong></div>
+        <div class="metric"><span class="muted">Foods logged</span><strong id="food-count">--</strong></div>
+        <div class="metric"><span class="muted">Weight</span><strong id="food-weight">--</strong></div>
+      </article>
+
+      <article class="panel span-8">
+        <h2>Cron Jobs</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Schedule</th><th>Last Run</th><th>Status</th><th>Next Run</th><th>Enabled</th></tr></thead>
+            <tbody id="cron-jobs"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel span-4">
+        <h2>Debt Tracker</h2>
+        <div class="metric"><span class="muted">Total debt</span><strong id="debt-total">--</strong></div>
+        <div class="metric"><span class="muted">Available spend</span><strong id="debt-available">--</strong></div>
+        <div class="metric"><span class="muted">Active debts</span><strong id="debt-active">--</strong></div>
+      </article>
+
+      <article class="panel span-6">
+        <h2>Git Activity</h2>
+        <div id="git-activity" class="repo-grid"></div>
+      </article>
+
+      <article class="panel span-6">
+        <h2>Backup Status</h2>
+        <div id="backups" class="backup-grid"></div>
+      </article>
+
+      <article class="panel span-12">
+        <h2>Activity Feed</h2>
+        <div id="events" class="events"></div>
+      </article>
+    </section>
+  </main>
+  <div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+  <script>
+    const stateUrl = "/api/state";
+    const eventsUrl = "/api/events";
+    const downApps = new Set();
+
+    const fmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
+    const money = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+    const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+
+    function text(value, fallback = "--") {
+      return value === null || value === undefined || value === "" ? fallback : value;
+    }
+
+    function date(value) {
+      return value ? fmt.format(new Date(value)) : "--";
+    }
+
+    function duration(ms) {
+      if (!ms) return "--";
+      const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      if (days) return `${days}d ${hours}h`;
+      if (hours) return `${hours}h ${minutes}m`;
+      return `${minutes}m`;
+    }
+
+    function badge(value, kind) {
+      return `<span class="badge ${kind}">${text(value)}</span>`;
+    }
+
+    function statusKind(value) {
+      const normalized = String(value || "").toLowerCase();
+      if (["up", "online", "ok", "success", "healthy"].includes(normalized)) return "ok";
+      if (["warn", "warning", "unknown"].includes(normalized)) return "warn";
+      return "bad";
+    }
+
+    function formatMoney(value) {
+      return value == null ? "--" : money.format(value);
+    }
+
+    function formatCronSchedule(value) {
+      if (value === null || value === undefined || value === "") return "--";
+      if (typeof value === "string") {
+        try {
+          const parsed = JSON.parse(value);
+          if (parsed && typeof parsed === "object") return text(parsed.expr || parsed.display, value);
+        } catch {
+          return value;
+        }
+        return value;
+      }
+      if (typeof value === "object") return text(value.expr || value.display, JSON.stringify(value));
+      return value;
+    }
+
+    function backupKind(backup) {
+      if (backup.age_hours === null || backup.age_hours === undefined) return "bad";
+      if (backup.age_hours < 24) return "ok";
+      if (backup.age_hours <= 48) return "warn";
+      return "bad";
+    }
+
+    function backupAge(backup) {
+      if (backup.age_hours === null || backup.age_hours === undefined) return "missing";
+      if (backup.age_hours < 24) return `${Math.max(0, Math.round(backup.age_hours))}h old`;
+      return `${Math.round(backup.age_hours / 24)}d old`;
+    }
+
+    function showToast(message) {
+      const toast = document.createElement("div");
+      toast.className = "toast";
+      toast.textContent = message;
+      document.getElementById("toasts").appendChild(toast);
+      setTimeout(() => toast.remove(), 8000);
+    }
+
+    function renderHealth(apps) {
+      const container = document.getElementById("health");
+      container.innerHTML = apps.map((app) => {
+        const up = app.status === "up";
+        const port = new URL(app.url).port;
+        return `
+          <article class="panel health-card span-6 ${up ? "up" : "down"}">
+            <h2>${app.app}</h2>
+            <div class="metric"><span>${badge(up ? "UP" : "DOWN", up ? "ok" : "bad")}</span><strong>${text(app.response_time_ms)}ms</strong></div>
+            <p class="muted" style="margin-top:10px">Port ${port}</p>
+          </article>
+        `;
+      }).join("");
+
+      const anyDown = apps.some((app) => app.status !== "up");
+      const dot = document.getElementById("fleet-dot");
+      dot.className = `dot ${anyDown ? "bad" : "ok"}`;
+
+      for (const app of apps) {
+        if (app.status !== "up" && !downApps.has(app.app)) {
+          downApps.add(app.app);
+          showToast(`${app.app} is down`);
+        }
+        if (app.status === "up") downApps.delete(app.app);
+      }
+    }
+
+    function renderProcesses(processes) {
+      document.getElementById("processes").innerHTML = processes.map((process) => `
+        <tr>
+          <td>${process.name}</td>
+          <td>${badge(process.status, statusKind(process.status))}</td>
+          <td>${duration(process.uptime)}</td>
+          <td>${text(process.restarts)}</td>
+          <td>${process.memory_mb == null ? "--" : `${number.format(process.memory_mb)} MB`}</td>
+          <td>${process.cpu == null ? "--" : `${number.format(process.cpu)}%`}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="6" class="muted">No process data</td></tr>`;
+    }
+
+    function renderCron(jobs) {
+      document.getElementById("cron-jobs").innerHTML = jobs.map((job) => `
+        <tr>
+          <td>${job.name}</td>
+          <td><code>${formatCronSchedule(job.schedule)}</code></td>
+          <td>${date(job.last_run_at)}</td>
+          <td>${badge(job.last_status || "unknown", statusKind(job.last_status))}</td>
+          <td>${date(job.next_run_at)}</td>
+          <td>${badge(job.enabled ? "enabled" : "disabled", job.enabled ? "ok" : "warn")}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="6" class="muted">No cron jobs found</td></tr>`;
+    }
+
+    function renderGit(commits) {
+      const byRepo = Object.groupBy ? Object.groupBy(commits, (commit) => commit.repo) : commits.reduce((acc, commit) => {
+        (acc[commit.repo] ||= []).push(commit);
+        return acc;
+      }, {});
+      document.getElementById("git-activity").innerHTML = Object.entries(byRepo).map(([repo, rows]) => `
+        <section class="panel alt">
+          <h3>${repo}</h3>
+          ${rows.map((commit) => `
+            <div class="commit">
+              <code>${commit.commit_hash}</code>
+              <span class="commit-message">${commit.message}</span>
+              <span class="muted">${date(commit.date)}</span>
+            </div>
+          `).join("")}
+        </section>
+      `).join("") || `<p class="muted">No git activity found</p>`;
+    }
+
+    function renderBackups(backups) {
+      const byApp = Object.groupBy ? Object.groupBy(backups, (backup) => backup.app) : backups.reduce((acc, backup) => {
+        (acc[backup.app] ||= []).push(backup);
+        return acc;
+      }, {});
+      document.getElementById("backups").innerHTML = Object.entries(byApp).map(([app, rows]) => `
+        <section class="panel alt">
+          <h3>${app}</h3>
+          ${rows.map((backup) => `
+            <div class="backup-item">
+              ${badge(backupAge(backup), backupKind(backup))}
+              <span class="filename">${backup.filename}</span>
+              <span class="muted">${backup.size_bytes == null ? "" : `${number.format(backup.size_bytes / 1024)} KB`}</span>
+            </div>
+          `).join("")}
+        </section>
+      `).join("") || `<p class="muted">No backup data found</p>`;
+    }
+
+    function renderWidgets(state) {
+      const food = state.food_activity || {};
+      document.getElementById("food-calories").textContent = food.calories == null ? "--" : number.format(food.calories);
+      document.getElementById("food-protein").textContent = food.protein == null ? "--" : `${number.format(food.protein)}g`;
+      document.getElementById("food-count").textContent = text(food.foods_count);
+      document.getElementById("food-weight").textContent = food.weight == null ? "--" : number.format(food.weight);
+
+      const debt = state.debt_activity || {};
+      document.getElementById("debt-total").textContent = formatMoney(debt.total_debt);
+      document.getElementById("debt-available").textContent = formatMoney(debt.available_spend);
+      document.getElementById("debt-active").textContent = text(debt.active_debts);
+    }
+
+    function renderEvents(events) {
+      document.getElementById("events").innerHTML = events.map((event) => `
+        <div class="event">
+          <span class="muted">${date(event.timestamp)}</span>
+          <span class="source">${event.source}</span>
+          <span>${event.description}</span>
+        </div>
+      `).join("") || `<p class="muted">No events yet</p>`;
+    }
+
+    async function loadState() {
+      const response = await fetch(stateUrl);
+      const state = await response.json();
+      document.getElementById("server-clock").textContent = date(state.server_time);
+      renderHealth(state.app_health || []);
+      renderProcesses(state.processes || []);
+      renderCron(state.cron_jobs || []);
+      renderGit(state.git_activity || []);
+      renderBackups(state.backups || []);
+      renderWidgets(state);
+    }
+
+    async function loadEvents() {
+      const response = await fetch(eventsUrl);
+      const payload = await response.json();
+      renderEvents(payload.events || []);
+    }
+
+    async function refreshAll() {
+      try {
+        await Promise.all([loadState(), loadEvents()]);
+      } catch (error) {
+        showToast("Mission Control refresh failed");
+      }
+    }
+
+    refreshAll();
+    setInterval(loadState, 10000);
+    setInterval(loadEvents, 5000);
+  </script>
+</body>
+</html>
